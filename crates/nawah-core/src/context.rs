@@ -1,10 +1,10 @@
 use std::{
-    ffi::OsStr,
-    io::{self, Read, Write},
-    path::{Path, PathBuf},
-    process::{Command, Stdio},
+    ffi::OsStr, io::{self, Read, Write}, path::{Path, PathBuf}, process::{Command, Stdio}
 };
 use thiserror::Error;
+
+use bollard::{Docker, body_full, body_stream};
+use futures_util::stream::StreamExt;
 
 #[derive(Debug, Clone)]
 pub enum OrchestratorKind {
@@ -52,6 +52,44 @@ impl NawahContext {
         }
     }
 
+    pub async fn load_application_via_bollard(&self, app_path: &str, _build: bool) -> Result<String, AppNotFound> {
+
+        let path = Path::new(app_path);
+
+        if !path.exists() || !path.is_dir() {
+            return Err(AppNotFound::InvalidApplicationPath);
+        }
+
+        let image_name = path
+            .file_name()
+            .and_then(OsStr::to_str)
+            .unwrap_or("app")
+            .to_string().to_lowercase();
+
+        let image_tag = format!("{}:latest", image_name);
+
+        let docker = Docker::connect_with_local_defaults()
+            .map_err(|e| AppNotFound::DockerMissing(e.to_string()))?;
+
+        docker.version().await.map_err(|e| AppNotFound::DockerMissing(e.to_string()))?;
+
+        let build_image_options = bollard::query_parameters::BuildImageOptionsBuilder::default()
+            .dockerfile(&format!("{}//nawah//{}",path.to_str().unwrap(), "Dockerfile"))
+            .t(&image_tag)
+            .pull("true")
+            .rm(true);
+
+        let mut contents = Vec::new();
+        
+        let mut image_build_stream = docker.build_image(build_image_options.build(), None, Some(body_full(contents.into())));
+
+        while let Some(msg) = image_build_stream.next().await {
+            println!("message: {msg:?}");   
+        }
+
+        Ok(image_tag)
+        
+    }
     pub fn load_application(&self, app_path: &str, build: bool) -> Result<String, AppNotFound> {
         // TODO: first check if the application exists in that path
         let path = Path::new(app_path);

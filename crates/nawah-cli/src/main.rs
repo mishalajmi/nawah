@@ -1,6 +1,10 @@
-use nawah_core::context::{AppNotFound, NawahContext};
+use nawah_core::context::NawahContext;
 
-fn main() {
+#[tokio::main]
+async fn main() {
     let context = NawahContext::default();
-    context.load_application("/Users/mishal/Projects/elm-wallet", true);
+    match context.load_application_via_bollard("C:\\Users\\zacks\\Desktop\\Work", true).await {
+        Ok(t) => println!("{}", t),
+        Err(e) => println!("{:?}", e)
+    };
 }
