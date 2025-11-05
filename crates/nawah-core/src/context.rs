@@ -1,8 +1,8 @@
 use std::{
-    ffi::OsStr, io::{self, Read, Write}, path::{Path, PathBuf}, process::{Command, Stdio}
+    env, ffi::OsStr, io::{self, Cursor, Read, Write}, path::{Path, PathBuf}, process::{Command, Stdio}
 };
 use thiserror::Error;
-
+use tar::Builder;
 use bollard::{Docker, body_full, body_stream};
 use futures_util::stream::StreamExt;
 
@@ -68,19 +68,24 @@ impl NawahContext {
 
         let image_tag = format!("{}:latest", image_name);
 
-        let docker = Docker::connect_with_local_defaults()
+        let docker = Docker::connect_with_unix_defaults()
             .map_err(|e| AppNotFound::DockerMissing(e.to_string()))?;
 
         docker.version().await.map_err(|e| AppNotFound::DockerMissing(e.to_string()))?;
 
         let build_image_options = bollard::query_parameters::BuildImageOptionsBuilder::default()
-            .dockerfile(&format!("{}//nawah//{}",path.to_str().unwrap(), "Dockerfile"))
+            .dockerfile("Dockerfile")
             .t(&image_tag)
             .pull("true")
             .rm(true);
 
         let mut contents = Vec::new();
-        
+        {
+            let mut tar = Builder::new(&mut contents);
+            tar.append_dir_all(".", path)?;
+            tar.finish()?;
+        }
+
         let mut image_build_stream = docker.build_image(build_image_options.build(), None, Some(body_full(contents.into())));
 
         while let Some(msg) = image_build_stream.next().await {
