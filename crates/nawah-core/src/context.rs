@@ -1,10 +1,8 @@
-use std::{
-    env, ffi::OsStr, io::{self, Cursor, Read, Write}, path::{Path, PathBuf}, process::{Command, Stdio}
-};
-use thiserror::Error;
-use tar::Builder;
-use bollard::{Docker, body_full, body_stream};
+use bollard::{Docker, body_full};
 use futures_util::stream::StreamExt;
+use std::{ffi::OsStr, io, path::PathBuf};
+use tar::Builder;
+use thiserror::Error;
 
 #[derive(Debug, Clone)]
 pub enum OrchestratorKind {
@@ -13,10 +11,8 @@ pub enum OrchestratorKind {
 }
 
 #[derive(Debug, Clone)]
-pub struct NawahContext {
-    orchestrator: OrchestratorKind,
-    // route: RouteSpec,
-    // apps: Vec<AppSpec>,
+pub struct Context {
+    _orchestrator: OrchestratorKind,
 }
 
 #[derive(Debug, Error)]
@@ -33,29 +29,18 @@ pub enum AppNotFound {
     IoError(#[from] io::Error),
 }
 
-impl Default for NawahContext {
+impl Default for Context {
     fn default() -> Self {
-        Self {
-            orchestrator: OrchestratorKind::Docker,
-            //     route: RouteSpec::default(),
-            //     apps: Vec::new(),
-        }
+        Self::new(OrchestratorKind::Docker)
     }
 }
 
-impl NawahContext {
+impl Context {
     pub fn new(orchestrator: OrchestratorKind) -> Self {
-        NawahContext {
-            orchestrator,
-            // route: RouteSpec::default(),
-            // apps: Vec::new(),
-        }
+        Self { _orchestrator: orchestrator }
     }
 
-    pub async fn load_application_via_bollard(&self, app_path: &str, _build: bool) -> Result<String, AppNotFound> {
-
-        let path = Path::new(app_path);
-
+    pub async fn load_application(&self, path: &PathBuf, _build: bool) -> Result<(), AppNotFound> {
         if !path.exists() || !path.is_dir() {
             return Err(AppNotFound::InvalidApplicationPath);
         }
@@ -64,14 +49,18 @@ impl NawahContext {
             .file_name()
             .and_then(OsStr::to_str)
             .unwrap_or("app")
-            .to_string().to_lowercase();
+            .to_string()
+            .to_lowercase();
 
         let image_tag = format!("{}:latest", image_name);
 
-        let docker = Docker::connect_with_unix_defaults()
+        let docker = Docker::connect_with_defaults()
             .map_err(|e| AppNotFound::DockerMissing(e.to_string()))?;
 
-        docker.version().await.map_err(|e| AppNotFound::DockerMissing(e.to_string()))?;
+        docker
+            .version()
+            .await
+            .map_err(|e| AppNotFound::DockerMissing(e.to_string()))?;
 
         let build_image_options = bollard::query_parameters::BuildImageOptionsBuilder::default()
             .dockerfile("Dockerfile")
@@ -86,105 +75,16 @@ impl NawahContext {
             tar.finish()?;
         }
 
-        let mut image_build_stream = docker.build_image(build_image_options.build(), None, Some(body_full(contents.into())));
+        let mut image_build_stream = docker.build_image(
+            build_image_options.build(),
+            None,
+            Some(body_full(contents.into())),
+        );
 
         while let Some(msg) = image_build_stream.next().await {
-            println!("message: {msg:?}");   
+            println!("message: {msg:?}");
         }
 
-        Ok(image_tag)
-        
-    }
-    pub fn load_application(&self, app_path: &str, build: bool) -> Result<String, AppNotFound> {
-        // TODO: first check if the application exists in that path
-        let path = Path::new(app_path);
-        if !path.exists() || !path.is_dir() {
-            return Err(AppNotFound::InvalidApplicationPath);
-        }
-        let image_name = path
-            .file_name()
-            .and_then(OsStr::to_str)
-            .unwrap_or("app")
-            .to_string();
-        let image_tag = format!("{}:latest", image_name);
-
-        // Look for candidates
-        // Accept "Dockerfile", "dockerfile"
-        let candidates: [PathBuf; 2] = [
-            path.join("Dockerfile"),
-            path.join("dockerfile").join("Dockerfile"),
-        ];
-        let dockerfile = candidates.iter().find(|p| p.exists());
-        if dockerfile.is_none() {
-            return Err(AppNotFound::DockerfileMissing);
-        }
-
-        if build {
-            match Command::new("docker").arg("--version").output() {
-                Ok(o) if o.status.success() => {
-                    println!("Yay");
-                }
-                Ok(o) => {
-                    return Err(AppNotFound::DockerMissing(format!(
-                        "docker --version returned non-zero. stdout: {}, stderr: {}",
-                        String::from_utf8_lossy(&o.stdout),
-                        String::from_utf8_lossy(&o.stderr)
-                    )));
-                }
-                Err(e) => {
-                    return Err(AppNotFound::DockerMissing(format!(
-                        "failed to execute docker: {}",
-                        e
-                    )));
-                }
-            }
-        }
-
-        let mut cmd = Command::new("docker");
-        cmd.arg("build")
-            .arg("-t")
-            .arg(&image_tag)
-            .arg(".")
-            .current_dir(path)
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
-
-        let mut child = cmd.spawn().map_err(AppNotFound::IoError)?;
-
-        if let Some(mut out) = child.stdout.take() {
-            let mut buf = [0u8; 1024];
-            loop {
-                match out.read(&mut buf) {
-                    Ok(0) => break,
-                    Ok(n) => {
-                        if let Err(e) = io::stdout().write_all(&buf[..n]) {
-                            eprintln!("failed to write stdout: {}", e);
-                        }
-                    }
-                    Err(e) => {
-                        eprintln!("error reading docker stdout: {}", e);
-                        break;
-                    }
-                }
-            }
-        }
-
-        let mut stderr_capture = String::new();
-        if let Some(mut err) = child.stderr.take() {
-            let mut tmp_buf = Vec::new();
-            if let Err(e) = err.read_to_end(&mut tmp_buf) {
-                eprintln!("error reading docker stderr: {}", e);
-            }
-            stderr_capture = String::from_utf8_lossy(&tmp_buf).to_string();
-            let _ = io::stderr().write_all(tmp_buf.as_slice());
-        }
-
-        let status = child.wait().map_err(AppNotFound::IoError)?;
-        if !status.success() {
-            return Err(AppNotFound::BuildFailed(stderr_capture));
-        }
-
-        // TODO: then check if it contains a Dockerfile
-        Ok(image_tag)
+        Ok(())
     }
 }
